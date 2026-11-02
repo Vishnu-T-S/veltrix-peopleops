@@ -1,0 +1,21 @@
+# Secrets: never commit real keys
+.env
+
+# Test data supplied by the reviewers is replaced at run time.
+# Anchored with a leading slash so it does NOT match the app/data/ source package.
+/data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Runtime artefacts
+logs/
+*.log
