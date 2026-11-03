@@ -119,7 +119,7 @@ def apply_leave(ctx: ToolContext, leave_type, start_date, end_date) -> ToolResul
         repository.adjust_balance(
             ctx.conn, ctx.requester.employee_id, valid.leave_type, -valid.working_days
         )
-        return success(
+    return success(
         request_id=request_id,
         leave_type=valid.leave_type,
         start_date=valid.start.isoformat(),
