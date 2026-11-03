@@ -19,6 +19,8 @@ from app.ingestion.models import Block, DocMeta, ParsedDocument
 from app.ingestion.ocr import OcrEngine, OcrUnavailable
 from app.ingestion.readers.common import BULLET, clean_rows, collapse, is_metadata_table
 
+pymupdf.no_recommend_layout()   # silence PyMuPDF's advertisement for its optional layout add-on
+
 logger = logging.getLogger("veltrix.ingestion")
 
 MIN_TEXT_CHARS = 20          # fewer characters than this on a page: treat it as a scan
