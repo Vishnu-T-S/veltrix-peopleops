@@ -46,7 +46,7 @@ a JSON object describing what they want.
  "as_of_date": "YYYY-MM-DD" only if the user asks about a specific date or year IN THE PAST (for a whole past year use its last day), else null,
  "data": list from ["balance","requests","team"] for leave_data / policy_and_data,
  "employee_ref": null if the user means themselves, else the employee ID (like E1001) or the person's name as written,
- "leave_type": "annual" or "sick" only if the user said so (sick, sick leave -> "sick"; annual, vacation, holiday leave -> "annual"; anything else or unspecified -> null),
+ "leave_type": "annual" or "sick", only if the user explicitly said "annual" or "sick" (e.g. "sick leave", "annual leave"); anything else, including just "leave", "time off" or "vacation", -> null,
  "start_date": "YYYY-MM-DD" or null, "end_date": "YYYY-MM-DD" or null,
  "request_id": the leave request ID if the user gave one, else null,
  "status": "pending", "approved" or "cancelled" if the user filters requests by status, else null,

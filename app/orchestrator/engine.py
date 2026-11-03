@@ -22,6 +22,7 @@ from app.llm.client import LLM, LLMError
 from app.orchestrator.planner import (Plan, is_confirmation, is_decline, looks_like_injection,
                                        plan_message)
 from app.orchestrator.session import Pending, SessionState
+from app.logctx import request_id_var
 from app.privacy import sanitize
 from app.rag.answering import answer_policy_question
 from app.retrieval.retriever import Retriever
@@ -68,6 +69,14 @@ def refuse(message: str) -> ChatResponse:
 
 def clarify(message: str) -> ChatResponse:
     return ChatResponse(message, "clarify")
+
+
+def log_tool(ctx: ToolContext, name: str, args: Dict[str, Any], result: ToolResult, dry_run: bool = False) -> None:
+    """Audit line for every tool call. Only employee IDs, never names, emails or phone numbers."""
+    logger.info("tool_call request_id=%s name=%s dry_run=%s requester=%s target=%s status=%s code=%s",
+                request_id_var.get(), name, dry_run, ctx.requester.employee_id,
+                args.get("employee_id") or args.get("request_id") or "-",
+                "success" if result.ok else "error", result.code or "-")
 
 
 def _call(name: str, args: Dict[str, Any], status: str) -> Dict[str, Any]:
@@ -149,6 +158,7 @@ class Orchestrator:
 
         args = {"leave_type": plan.leave_type, "start_date": plan.start_date, "end_date": plan.end_date}
         check = DRY_RUNS["apply_leave"](ctx, **args)
+        log_tool(ctx, "apply_leave", args, check, dry_run=True)
         if not check.ok:
             return ChatResponse(check.error or "That request can't be made.", "tool", tool_calls=[_call("apply_leave", args, "error")])
         d = check.data
@@ -173,6 +183,7 @@ class Orchestrator:
             if not open_requests:
                 args = {"employee_id": me}
                 result = TOOLS["list_leave_requests"](ctx, **args)
+                log_tool(ctx, "list_leave_requests", args, result)
                 return ChatResponse("You have no leave requests that can be cancelled. Only pending or approved "
                                     "requests that start after today can be cancelled.", "tool",
                                     tool_calls=[_call("list_leave_requests", args, "success" if result.ok else "error")])
@@ -188,6 +199,7 @@ class Orchestrator:
 
         args = {"request_id": request_id}
         check = DRY_RUNS["cancel_leave"](ctx, **args)
+        log_tool(ctx, "cancel_leave", args, check, dry_run=True)
         if not check.ok:
             return ChatResponse(check.error or "That request can't be cancelled.", "tool",
                                 tool_calls=[_call("cancel_leave", args, "error")])
@@ -202,6 +214,7 @@ class Orchestrator:
     def _execute_pending(self, ctx: ToolContext, state: SessionState) -> ChatResponse:
         pending, state.pending = state.pending, None
         result = TOOLS[pending.name](ctx, **pending.args)
+        log_tool(ctx, pending.name, pending.args, result)
         call = _call(pending.name, pending.args, "success" if result.ok else "error")
         if not result.ok:
             return ChatResponse(f"I couldn't complete that: {result.error}", "tool", tool_calls=[call])
@@ -257,6 +270,7 @@ class Orchestrator:
             else:
                 name, args = "get_team_leave", {"start_date": plan.start_date, "end_date": plan.end_date}
             result = TOOLS[name](ctx, **args)
+            log_tool(ctx, name, args, result)
             if result.code == "forbidden":
                 return [], [], refuse(result.error)
             if result.code == "managers_only":

@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional, Protocol
 
+from app.logctx import deadline_var, request_id_var
 from app.tokens import count_tokens
 
 logger = logging.getLogger("veltrix.llm")
@@ -64,58 +65,118 @@ def parse_json(text: str) -> Dict[str, Any]:
     return value
 
 
-class OpenAIClient:
-    """Chat Completions over HTTPS using only the standard library (no extra dependency)."""
+class HttpLLM:
+    """Shared plumbing for every provider: the corpus-token guard, one retry on temporary
+    errors, and the per-call log line. A provider only says how to build its request and
+    how to read its reply. Uses only the standard library (no extra dependency)."""
 
-    def __init__(self, api_key: Optional[str], model: Optional[str],
-                 base_url: str = "https://api.openai.com/v1", timeout: float = 20.0):
-        self._key, self._model, self._base, self._timeout = api_key, model, base_url.rstrip("/"), timeout
+    key_hint = "API key and model"
+
+    def __init__(self, api_key: Optional[str], model: Optional[str], base_url: Optional[str] = None,
+                 timeout: float = 20.0):
+        self._key, self._model, self._timeout = api_key, model, timeout
+        self._base = (base_url or self.default_base).rstrip("/")
         self._ssl = ssl.create_default_context()
+
+    default_base = ""
 
     @property
     def configured(self) -> bool:
         return bool(self._key and self._model)
 
+    def _build(self, system: str, prompt: str, json_mode: bool, max_tokens: int):
+        """Return (url, headers, body) for one request."""
+        raise NotImplementedError
+
+    def _text(self, data: Dict[str, Any]) -> str:
+        """Return the reply text from the provider's JSON response."""
+        raise NotImplementedError
+
     def complete(self, purpose, system, user, *, corpus_text="", json_mode=False, max_tokens=700) -> str:
         corpus_tokens = check_corpus_budget(purpose, corpus_text)
         if not self.configured:
-            raise LLMError("OPENAI_API_KEY and OPENAI_MODEL must be set")
+            raise LLMError(f"{self.key_hint} must be set")
         prompt = join_prompt(user, corpus_text)
-        body: Dict[str, Any] = {
-            "model": self._model,
-            "temperature": 0,
-            "seed": 7,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        }
-        if json_mode:
-            body["response_format"] = {"type": "json_object"}
+        url, headers, body = self._build(system, prompt, json_mode, max_tokens)
         payload = json.dumps(body).encode()
         started = time.monotonic()
         last: Optional[Exception] = None
         for attempt in range(2):
-            request = urllib.request.Request(
-                f"{self._base}/chat/completions", data=payload, method="POST",
-                headers={"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"},
-            )
+            request = urllib.request.Request(url, data=payload, method="POST",
+                                             headers={**headers, "Content-Type": "application/json"})
+            timeout = self._timeout
+            if deadline_var.get():                      # the whole request must finish within its deadline
+                timeout = min(timeout, deadline_var.get() - time.monotonic())
+                if timeout < 1.0:
+                    last = TimeoutError("request deadline reached")
+                    break
             try:
-                with urllib.request.urlopen(request, timeout=self._timeout, context=self._ssl) as response:
+                with urllib.request.urlopen(request, timeout=timeout, context=self._ssl) as response:
                     data = json.loads(response.read().decode())
-                text = data["choices"][0]["message"]["content"] or ""
+                text = self._text(data) or ""
                 logger.info(
-                    "llm_call purpose=%s model=%s corpus_tokens=%d prompt_tokens=%d latency_ms=%d",
-                    purpose, self._model, corpus_tokens, count_tokens(system) + count_tokens(prompt),
-                    int((time.monotonic() - started) * 1000),
+                    "llm_call request_id=%s purpose=%s model=%s corpus_tokens=%d prompt_tokens=%d latency_ms=%d",
+                    request_id_var.get(), purpose, self._model, corpus_tokens,
+                    count_tokens(system) + count_tokens(prompt), int((time.monotonic() - started) * 1000),
                 )
                 return text
             except urllib.error.HTTPError as exc:
                 last = exc
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == 1:
+                if exc.code not in (429, 500, 502, 503, 504, 529) or attempt == 1:
                     break
-            except (urllib.error.URLError, TimeoutError, OSError, KeyError, ValueError) as exc:
+            except (urllib.error.URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError) as exc:
                 last = exc
                 if attempt == 1:
                     break
             time.sleep(0.5)
-        logger.error("llm_call purpose=%s failed corpus_tokens=%d error=%s", purpose, corpus_tokens, type(last).__name__)
+        logger.error("llm_call request_id=%s purpose=%s failed corpus_tokens=%d error=%s",
+                     request_id_var.get(), purpose, corpus_tokens, type(last).__name__)
         raise LLMError(f"{purpose}: model call failed ({type(last).__name__})")
+
+
+class OpenAIClient(HttpLLM):
+    key_hint = "OPENAI_API_KEY and OPENAI_MODEL"
+    default_base = "https://api.openai.com/v1"
+
+    def _build(self, system, prompt, json_mode, max_tokens):
+        body: Dict[str, Any] = {
+            "model": self._model, "temperature": 0, "seed": 7, "max_tokens": max_tokens,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        return f"{self._base}/chat/completions", {"Authorization": f"Bearer {self._key}"}, body
+
+    def _text(self, data):
+        return data["choices"][0]["message"]["content"]
+
+
+class AnthropicClient(HttpLLM):
+    key_hint = "ANTHROPIC_API_KEY and ANTHROPIC_MODEL"
+    default_base = "https://api.anthropic.com/v1"
+
+    def _build(self, system, prompt, json_mode, max_tokens):
+        instruction = system + ("\n\nReply with a single JSON object and nothing else." if json_mode else "")
+        body = {"model": self._model, "temperature": 0, "max_tokens": max_tokens, "system": instruction,
+                "messages": [{"role": "user", "content": prompt}]}
+        headers = {"x-api-key": self._key, "anthropic-version": "2023-06-01"}
+        return f"{self._base}/messages", headers, body
+
+    def _text(self, data):
+        return "".join(block.get("text", "") for block in data["content"] if block.get("type") == "text")
+
+
+class GeminiClient(HttpLLM):
+    key_hint = "GEMINI_API_KEY (or GOOGLE_API_KEY) and GEMINI_MODEL"
+    default_base = "https://generativelanguage.googleapis.com/v1beta"
+
+    def _build(self, system, prompt, json_mode, max_tokens):
+        config: Dict[str, Any] = {"temperature": 0, "maxOutputTokens": max(max_tokens, 1500)}
+        if json_mode:
+            config["responseMimeType"] = "application/json"
+        body = {"systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": config}
+        return f"{self._base}/models/{self._model}:generateContent", {"x-goog-api-key": self._key}, body
+
+    def _text(self, data):
+        return "".join(part.get("text", "") for part in data["candidates"][0]["content"]["parts"])

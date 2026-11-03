@@ -465,6 +465,19 @@ def test_logs_contain_no_names_emails_or_phones(client, llm, conn, caplog):
         assert name not in logs and email not in logs and phone not in logs
 
 
+def test_every_tool_call_is_logged_with_employee_ids_only(client, llm, caplog):
+    caplog.set_level(logging.INFO)
+    chat(client, "E1", balance_plan(llm, "my balance"))
+    chat(client, "E1", balance_plan(llm, "balance of E2", ref="E2"), session="s2")
+    chat(client, "E1", apply_plan(llm, "leave", leave_type="annual", start_date="2026-11-18", end_date="2026-11-19"), session="s3")
+    chat(client, "E1", "yes", session="s3")
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("tool_call")]
+    assert any("name=get_leave_balance" in l and "requester=E1 target=E1 status=success" in l for l in lines)
+    assert any("requester=E1 target=E2 status=error code=forbidden" in l for l in lines)
+    assert any("name=apply_leave dry_run=True" in l for l in lines) and any("name=apply_leave dry_run=False" in l and "status=success" in l for l in lines)
+    assert all("request_id=" in l and "request_id=-" not in l for l in lines)
+
+
 def test_an_llm_failure_gives_a_graceful_answer(make_service):
     from app.llm.client import LLMError
 

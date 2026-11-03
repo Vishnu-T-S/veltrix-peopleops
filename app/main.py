@@ -20,18 +20,25 @@ from app.config import Settings, load_settings
 from app.data import repository
 from app.data.db import connect, ensure_schema
 from app.ingestion.pipeline import run_ingestion
-from app.llm.client import LLM, OpenAIClient
+from app.llm.client import LLM
+from app.llm.factory import make_llm
 from app.orchestrator.engine import Orchestrator
 from app.orchestrator.session import SessionStore
+import time
+
+from app.logctx import deadline_var, request_id_var
 from app.privacy import PersonalDataFilter
 from app.retrieval.retriever import Retriever
 
 logger = logging.getLogger("veltrix.api")
 
+REQUEST_BUDGET_SECONDS = 26.0   # the brief allows 30 s per request; leave room to answer
+
 
 def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    for handler in logging.getLogger().handlers:
+    loggers = [logging.getLogger(name) for name in ("", "uvicorn", "uvicorn.error", "uvicorn.access")]
+    for handler in [h for logger_ in loggers for h in logger_.handlers]:
         if not any(isinstance(f, PersonalDataFilter) for f in handler.filters):
             handler.addFilter(PersonalDataFilter())
 
@@ -67,7 +74,7 @@ def ingest(settings: Settings, state: AppState, llm: LLM) -> None:
 def create_app(settings: Optional[Settings] = None, llm: Optional[LLM] = None, background: bool = True) -> FastAPI:
     configure_logging()
     settings = settings or load_settings()
-    llm = llm or OpenAIClient(settings.openai_api_key, settings.openai_model)
+    llm = llm or make_llm(settings)
     state = AppState()
 
     @asynccontextmanager
@@ -110,7 +117,13 @@ def create_app(settings: Optional[Settings] = None, llm: Optional[LLM] = None, b
                 return JSONResponse({"error": "this session belongs to another employee"}, status_code=403)
 
             request_id = str(uuid.uuid4())
-            response = state.orchestrator.handle(conn, requester, session, message, settings.app_today)
+            token = request_id_var.set(request_id)
+            deadline_token = deadline_var.set(time.monotonic() + REQUEST_BUDGET_SECONDS)
+            try:
+                response = state.orchestrator.handle(conn, requester, session, message, settings.app_today)
+            finally:
+                request_id_var.reset(token)
+                deadline_var.reset(deadline_token)
             logger.info("chat request_id=%s employee=%s route=%s citations=%d tool_calls=%d pending=%s",
                         request_id, requester.employee_id, response.route, len(response.citations),
                         len(response.tool_calls), response.pending_confirmation)
