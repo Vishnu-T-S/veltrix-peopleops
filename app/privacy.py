@@ -46,9 +46,17 @@ def sanitize(text: str) -> str:
 
 
 class PersonalDataFilter(logging.Filter):
-    """Masks emails and phone numbers in every log record (files and console)."""
+    """Masks emails and phone numbers in every log record (files and console).
+
+    It scrubs the message template and each string argument in place and keeps the
+    record's shape, because other formatters (uvicorn's access log) depend on it.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = sanitize(record.getMessage())
-        record.args = ()
+        if isinstance(record.msg, str):
+            record.msg = sanitize(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(sanitize(a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: sanitize(v) if isinstance(v, str) else v for k, v in record.args.items()}
         return True

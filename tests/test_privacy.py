@@ -30,3 +30,19 @@ def test_log_filter_scrubs_emails_and_phones(caplog):
     record = logging.LogRecord("x", logging.INFO, "f", 1, "mail %s phone %s", ("a.b@c.example", "+91 98765 43210"), None)
     assert handler.filter(record)
     assert record.getMessage() == "mail a***@c.example phone [phone number hidden]"
+
+
+def test_filter_keeps_the_shape_uvicorn_access_logs_need():
+    from uvicorn.logging import AccessFormatter
+
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "f", 1,
+                               '%s - "%s %s HTTP/%s" %d', ("127.0.0.1:5000", "GET", "/health", "1.1", 200), None)
+    assert PersonalDataFilter().filter(record)
+    assert AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s').format(record) == \
+        '127.0.0.1:5000 - "GET /health HTTP/1.1" 200 OK'
+
+
+def test_filter_scrubs_dict_style_arguments():
+    record = logging.LogRecord("x", logging.INFO, "f", 1, "mail %(m)s", ({"m": "a.b@c.example"},), None)
+    PersonalDataFilter().filter(record)
+    assert record.getMessage() == "mail a***@c.example"
