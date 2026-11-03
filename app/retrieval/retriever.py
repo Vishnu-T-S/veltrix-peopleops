@@ -19,7 +19,7 @@ from app.retrieval.eligibility import is_eligible, is_upcoming
 from app.tokens import count_tokens
 
 DEFAULT_BUDGET_TOKENS = 2800   # the hard limit is 3,000 tokens of corpus text per LLM call
-DEFAULT_TOP_K = 12
+DEFAULT_TOP_K = 18
 
 
 @dataclass(frozen=True)
